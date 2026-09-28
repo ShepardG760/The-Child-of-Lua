@@ -19,12 +19,14 @@ var view_mode := "overview"
 var selected_mission := 0
 var unlocked_missions := 1
 var completed_missions := {}
-var chart_zoom := 1.0
-var target_chart_zoom := 1.0
+var chart_zoom := 0.34
+var target_chart_zoom := 0.34
 var moon_pan := Vector2.ZERO
 var overview_handoff_pending := false
 var left_pan_active := false
 var left_pan_last := Vector2.ZERO
+var moon_asset_container: SubViewportContainer
+var moon_asset_camera: Camera3D
 var pulse := 0.0
 var toast := ""
 var toast_time := 0.0
@@ -39,11 +41,14 @@ var worlds := [
 
 func _ready() -> void:
     font = ThemeDB.fallback_font
+    setup_moon_asset()
     queue_redraw()
 
 func _process(delta: float) -> void:
     pulse += delta
     chart_zoom = lerpf(chart_zoom, target_chart_zoom, minf(delta * 7.0, 1.0))
+    if moon_asset_container:
+        update_moon_asset_transform()
     if mission_countdown > 0.0:
         mission_countdown -= delta
         if mission_countdown <= 0.0:
@@ -63,7 +68,7 @@ func _process(delta: float) -> void:
 
 func _draw() -> void:
     var size := get_viewport_rect().size
-    draw_rect(Rect2(Vector2.ZERO, size), BG)
+    draw_rect(Rect2(Vector2.ZERO, size), Color(BG, 0.72))
     draw_background(size)
     draw_header(size)
     draw_sidebar(size)
@@ -71,6 +76,76 @@ func _draw() -> void:
     draw_footer(size)
     if toast != "":
         draw_toast(size)
+
+func setup_moon_asset() -> void:
+    var asset_scene := load("res://blender/lua_moon.glb") as PackedScene
+    if not asset_scene:
+        return
+    moon_asset_container = SubViewportContainer.new()
+    moon_asset_container.name = "LuaMoonAssetLayer"
+    moon_asset_container.set_anchors_preset(Control.PRESET_TOP_LEFT)
+    moon_asset_container.size = Vector2(1536, 864)
+    moon_asset_container.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    moon_asset_container.show_behind_parent = true
+    moon_asset_container.z_index = -1
+    moon_asset_container.visible = true
+    add_child(moon_asset_container)
+    var viewport := SubViewport.new()
+    viewport.name = "LuaMoonViewport"
+    viewport.size = Vector2i(1536, 864)
+    viewport.transparent_bg = true
+    viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+    moon_asset_container.add_child(viewport)
+    var asset := asset_scene.instantiate()
+    viewport.add_child(asset)
+    moon_asset_camera = find_moon_camera(asset)
+    if not moon_asset_camera:
+        moon_asset_camera = Camera3D.new()
+        moon_asset_camera.name = "Generated Lua camera"
+        viewport.add_child(moon_asset_camera)
+        moon_asset_camera.position = Vector3(0.0, -8.5, 0.4)
+        moon_asset_camera.look_at(Vector3.ZERO, Vector3.UP)
+    if not find_moon_light(asset):
+        var light := DirectionalLight3D.new()
+        light.name = "Generated Lua sunlight"
+        light.rotation_degrees = Vector3(-28.0, -24.0, -38.0)
+        light.light_energy = 1.4
+        viewport.add_child(light)
+    if moon_asset_camera:
+        moon_asset_camera.current = true
+        moon_asset_camera.far = 1000.0
+
+func find_moon_light(node: Node) -> DirectionalLight3D:
+    if node is DirectionalLight3D:
+        return node as DirectionalLight3D
+    for child in node.get_children():
+        var light := find_moon_light(child)
+        if light:
+            return light
+    return null
+
+func update_moon_asset_transform() -> void:
+    if not moon_asset_container or not moon_asset_camera:
+        return
+    var size := get_viewport_rect().size
+    var focus := clampf(inverse_lerp(0.34, 1.0, chart_zoom), 0.0, 1.0)
+    var body_scale := lerpf(0.14, chart_zoom, focus)
+    var lua_point := get_lua_screen_point(size)
+    var viewport_size := Vector2(1536, 864)
+    moon_asset_container.position = lua_point - viewport_size * 0.5
+    moon_asset_container.visible = true
+    var camera_distance := 8.5 / maxf(body_scale, 0.08)
+    moon_asset_camera.position = Vector3(0.0, -camera_distance, camera_distance * 0.047)
+    moon_asset_camera.look_at(Vector3.ZERO, Vector3.UP)
+
+func find_moon_camera(node: Node) -> Camera3D:
+    if node is Camera3D:
+        return node as Camera3D
+    for child in node.get_children():
+        var camera := find_moon_camera(child)
+        if camera:
+            return camera
+    return null
 
 func draw_background(size: Vector2) -> void:
     for i in range(18):
@@ -129,6 +204,7 @@ func draw_chart(size: Vector2) -> void:
     draw_string(font, origin + Vector2(24, 27), "SECTOR 01", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, MUTED)
     draw_string(font, origin + Vector2(24, 55), "THE QUIET EXPANSE", HORIZONTAL_ALIGNMENT_LEFT, -1, 25, TEXT)
     draw_string(font, origin + Vector2(24, 77), "Five known systems / begin at Lua", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, MUTED)
+    draw_system_sun(get_sun_screen_point(size))
     var points: Array[Vector2] = []
     for world in worlds:
         var overview_point := origin + Vector2(chart_size.x * world.pos.x, chart_size.y * world.pos.y) + Vector2(0, 42)
@@ -139,12 +215,13 @@ func draw_chart(size: Vector2) -> void:
         draw_dashed_line(points[i], points[i + 1], Color(0.24, 0.46, 0.56, 0.55), 1, 7, 5)
     draw_line(points[0], points[2], Color(0.24, 0.46, 0.56, 0.25), 1)
     for i in range(worlds.size()):
-        if i != 0 or focus < 0.12:
-            draw_world(worlds[i], points[i], i)
+        if i != 0 or not moon_asset_container:
+            draw_planet(worlds[i], points[i], i)
     if focus >= 0.12:
         var body_scale := lerpf(0.14, chart_zoom, focus)
         var lua_screen_point := points[0]
-        draw_moon_body(lua_screen_point, body_scale)
+        if not moon_asset_container or not moon_asset_container.visible:
+            draw_moon_body(lua_screen_point, body_scale)
         draw_string(font, lua_screen_point + Vector2(-24, 8), "LUA", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("#edf3f2"))
         draw_mission_web(lua_screen_point, lerpf(0.14, chart_zoom, focus))
         if mission_countdown > 0.0 or mission_live:
@@ -152,6 +229,31 @@ func draw_chart(size: Vector2) -> void:
     if focus > 0.7:
         draw_mission_panel(size)
     draw_string(font, origin + Vector2(24, chart_size.y + 34), "WHEEL: ZOOM   LEFT DRAG: PAN", HORIZONTAL_ALIGNMENT_LEFT, -1, 10, MUTED)
+
+func get_sun_screen_point(size: Vector2) -> Vector2:
+    var origin := Vector2(290, 96)
+    var chart_size := Vector2(size.x - 320, size.y - 165)
+    var lua_overview := origin + Vector2(chart_size.x * worlds[0].pos.x, chart_size.y * worlds[0].pos.y) + Vector2(0, 42)
+    var sun_overview := Vector2(size.x * 0.57, size.y * 0.43)
+    var focus := clampf(inverse_lerp(0.34, 1.0, chart_zoom), 0.0, 1.0)
+    var focused_sun := get_moon_center(size) + (sun_overview - lua_overview) * lerpf(1.0, 5.0, focus)
+    return sun_overview.lerp(focused_sun, focus)
+
+func draw_system_sun(center: Vector2) -> void:
+    var breathe := 1.0 + sin(pulse * 0.7) * 0.035
+    for glow in range(9, 0, -1):
+        var glow_radius := float(glow) * 30.0 * breathe
+        var glow_alpha := 0.008 + float(9 - glow) * 0.006
+        draw_circle(center, glow_radius, Color(0.10, 0.52, 1.0, glow_alpha))
+    draw_arc(center, 78.0 * breathe, pulse * 0.08, TAU + pulse * 0.08, 64, Color(0.15, 0.61, 1.0, 0.20), 1.0)
+    draw_arc(center, 58.0 * breathe, -pulse * 0.06, TAU - pulse * 0.06, 64, Color(0.32, 0.78, 1.0, 0.26), 1.2)
+    for ray in range(10):
+        var angle := float(ray) * TAU / 10.0 + pulse * 0.018
+        var inner := center + Vector2(cos(angle), sin(angle)) * 20.0
+        var outer := center + Vector2(cos(angle), sin(angle)) * (42.0 + float(ray % 3) * 8.0) * breathe
+        draw_line(inner, outer, Color(0.22, 0.68, 1.0, 0.13), 1.0)
+    draw_circle(center, 18.0 * breathe, Color(0.12, 0.49, 0.90, 0.18))
+    draw_circle(center, 7.0 * breathe, Color(0.62, 0.90, 1.0, 0.58))
 
 func draw_mission_timer(center: Vector2, body_scale: float) -> void:
     var timer_text := str(ceil(mission_countdown)) if mission_countdown > 0.0 else "GO"
@@ -187,18 +289,37 @@ func get_lua_screen_point(size: Vector2) -> Vector2:
     return lua_point.lerp(get_moon_center(size), focus)
 
 func draw_moon_body(center: Vector2, body_scale: float) -> void:
-    draw_arc(center, 230.0 * body_scale, 0.05, PI - 0.05, 64, Color(0.40, 0.63, 0.68, 0.38), 1.0 * body_scale)
-    draw_arc(center, 190.0 * body_scale, PI + 0.15, TAU - 0.15, 64, Color(0.40, 0.63, 0.68, 0.30), 1.0 * body_scale)
-    draw_arc(center, 145.0 * body_scale, 0.35, TAU - 0.35, 64, Color(0.40, 0.63, 0.68, 0.25), 1.0 * body_scale)
-    draw_line(center + Vector2(-255, 0) * body_scale, center + Vector2(255, 0) * body_scale, Color(0.40, 0.63, 0.68, 0.24), 1)
-    draw_line(center + Vector2(0, -255) * body_scale, center + Vector2(0, 255) * body_scale, Color(0.40, 0.63, 0.68, 0.18), 1)
-    draw_circle(center, 150.0 * body_scale, Color("#171e2c"))
-    draw_circle(center, 142.0 * body_scale, Color("#303849"))
-    draw_circle(center - Vector2(34, 34) * body_scale, 76.0 * body_scale, Color("#50586b"))
-    draw_circle(center + Vector2(45, 35) * body_scale, 56.0 * body_scale, Color("#242b3b"))
-    draw_circle(center + Vector2(-65, 62) * body_scale, 29.0 * body_scale, Color("#687285"))
-    draw_arc(center, 158.0 * body_scale, 0, TAU, 80, Color("#93a5bc"), 3.0 * body_scale)
-    draw_arc(center, 170.0 * body_scale, 0.2, 2.8, 40, Color("#c5d1db"), 2.0 * body_scale)
+    var radius := 150.0 * body_scale
+    var light_direction := Vector2(-0.34, -0.42)
+    draw_circle(center + Vector2(8, 12) * body_scale, radius + 5.0 * body_scale, Color(0.01, 0.02, 0.04, 0.75))
+    draw_circle(center, radius, Color("#596171"))
+    draw_circle(center + light_direction * 20.0 * body_scale, radius * 0.96, Color("#737b89"))
+    draw_circle(center + Vector2(34, 42) * body_scale, radius * 0.82, Color(0.12, 0.15, 0.20, 0.28))
+    var surface_dots := [
+        Vector2(-0.63, -0.18), Vector2(-0.48, 0.42), Vector2(-0.24, -0.54), Vector2(0.12, -0.72),
+        Vector2(0.38, -0.36), Vector2(0.56, 0.12), Vector2(0.42, 0.55), Vector2(-0.08, 0.68),
+        Vector2(-0.76, 0.18), Vector2(0.72, -0.28), Vector2(-0.18, 0.08), Vector2(0.18, 0.30)
+    ]
+    for i in range(surface_dots.size()):
+        var dot: Vector2 = center + surface_dots[i] * radius
+        var dot_radius := (2.0 + float((i * 7) % 5)) * body_scale
+        draw_circle(dot, dot_radius, Color(0.24, 0.27, 0.32, 0.22))
+    var craters := [
+        {"p": Vector2(-0.46, -0.30), "r": 0.13}, {"p": Vector2(-0.08, -0.50), "r": 0.09},
+        {"p": Vector2(0.30, -0.28), "r": 0.16}, {"p": Vector2(0.52, 0.20), "r": 0.10},
+        {"p": Vector2(0.18, 0.48), "r": 0.14}, {"p": Vector2(-0.34, 0.52), "r": 0.08},
+        {"p": Vector2(-0.66, 0.12), "r": 0.07}, {"p": Vector2(0.02, 0.12), "r": 0.055}
+    ]
+    for crater in craters:
+        var crater_pos: Vector2 = center + crater.p * radius
+        var crater_radius: float = crater.r * radius
+        var rim_offset := Vector2(-0.20, -0.24) * crater_radius
+        draw_circle(crater_pos + rim_offset, crater_radius * 1.12, Color(0.79, 0.82, 0.85, 0.24))
+        draw_circle(crater_pos + Vector2(0.14, 0.18) * crater_radius, crater_radius, Color(0.16, 0.19, 0.24, 0.72))
+        draw_circle(crater_pos + Vector2(-0.10, -0.12) * crater_radius, crater_radius * 0.68, Color(0.32, 0.35, 0.40, 0.55))
+        draw_arc(crater_pos + rim_offset, crater_radius * 1.12, 0.15, PI * 1.25, 16, Color(0.86, 0.88, 0.90, 0.40), maxf(body_scale, 1.0))
+    draw_arc(center, radius, 0.25, PI * 1.55, 64, Color("#d6dbe0"), 2.5 * body_scale)
+    draw_arc(center, radius, PI * 1.55, TAU - 0.25, 64, Color(0.05, 0.07, 0.10, 0.70), 4.0 * body_scale)
 
 func draw_mission_web(center: Vector2, web_scale: float) -> void:
     var mission_points := get_mission_points(center, web_scale)
@@ -246,7 +367,7 @@ func draw_mission_panel(size: Vector2) -> void:
         status_color = GOLD if mission_countdown <= 0.0 else CYAN
     draw_string(font, panel.position + Vector2(18, 150), status, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, status_color)
 
-func draw_world(world: Dictionary, pos: Vector2, index: int) -> void:
+func draw_planet(world: Dictionary, pos: Vector2, index: int) -> void:
     var active := index == selected
     var locked: bool = world.state == "LOCKED"
     var radius := 13.0 if not active else 18.0
@@ -258,9 +379,14 @@ func draw_world(world: Dictionary, pos: Vector2, index: int) -> void:
         draw_circle(pos, radius, Color("#30394b"))
         draw_string(font, pos + Vector2(-4, 5), "x", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, MUTED)
     else:
-        draw_circle(pos, radius + 4, Color(world.color, 0.12))
-        draw_circle(pos, radius, world.color)
-        draw_circle(pos - Vector2(4, 4), radius * 0.38, Color(1, 1, 1, 0.38))
+        draw_circle(pos + Vector2(2, 3), radius + 2, Color(0.01, 0.02, 0.04, 0.75))
+        draw_circle(pos, radius, Color(world.color, 0.72))
+        draw_circle(pos - Vector2(radius * 0.25, radius * 0.28), radius * 0.76, Color(world.color, 0.92))
+        draw_circle(pos - Vector2(radius * 0.34, radius * 0.38), radius * 0.22, Color(1, 1, 1, 0.34))
+        draw_arc(pos, radius * 0.96, 0.2, PI * 1.45, 24, Color(0.04, 0.06, 0.09, 0.56), 1.5)
+        for detail in range(3):
+            var detail_pos: Vector2 = pos + Vector2(cos(float(detail) * 2.1), sin(float(detail) * 2.1)) * radius * 0.42
+            draw_circle(detail_pos, radius * 0.12, Color(0.08, 0.11, 0.14, 0.22))
     var label_pos := pos + Vector2(27, 5)
     draw_string(font, label_pos, world.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, TEXT if not locked else MUTED)
     draw_string(font, label_pos + Vector2(0, 17), world.subtitle, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, MUTED)
